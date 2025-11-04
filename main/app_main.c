@@ -5,8 +5,58 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "driver/uart.h"
+#include "string.h"
 
 static const char *TAG = "app_main";
+
+// CLI 任务：读取 UART0 输入并解析命令
+static void cli_task(void *arg)
+{
+	char buf[128];
+	int idx = 0;
+	while (1) {
+		char c;
+		int len = uart_read_bytes(UART_NUM_0, (uint8_t*)&c, 1, pdMS_TO_TICKS(100));
+		if (len > 0) {
+			if (c == '\n' || c == '\r') {
+				buf[idx] = '\0';
+				if (idx > 0) {
+					// 解析命令
+					if (strncmp(buf, "set motor", 9) == 0) {
+						char motor[10];
+						char param[10];
+						int value;
+						if (sscanf(buf, "set %s %s %d", motor, param, &value) == 3) {
+							uint8_t id = (strcmp(motor, "motor1") == 0) ? 1 : (strcmp(motor, "motor2") == 0) ? 2 : 0;
+							if (id == 0) {
+								printf("Invalid motor: %s\n", motor);
+							} else {
+								if (strcmp(param, "speed") == 0) {
+									send_motor_command(id, (int16_t)value, 0, 0); // mode 0 for speed
+									printf("Set motor%u speed to %d\n", id, value);
+								} else if (strcmp(param, "pos") == 0) {
+									send_motor_command(id, 0, (int16_t)value, 1); // mode 1 for position
+									printf("Set motor%u pos to %d\n", id, value);
+								} else {
+									printf("Invalid param: %s\n", param);
+								}
+							}
+						} else {
+							printf("Invalid command format\n");
+						}
+					} else {
+						printf("Unknown command: %s\n", buf);
+					}
+				}
+				idx = 0;
+			} else if (idx < sizeof(buf) - 1) {
+				buf[idx++] = c;
+			}
+		}
+	}
+	vTaskDelete(NULL);
+}
 
 void app_main(void)
 {
@@ -21,6 +71,9 @@ void app_main(void)
     #if TEST_MODE
     simulator_start();
     #endif
+
+    // 启动 CLI 任务
+    xTaskCreate(cli_task, "cli_task", 4096, NULL, 5, NULL);
 
     ESP_LOGI(TAG, "app_main finished init");
     // 主任务不退出

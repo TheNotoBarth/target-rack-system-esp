@@ -128,10 +128,33 @@ int serial_cboard_send(const motor_command_t *cmds, size_t cmd_count)
 	uint8_t cks = calc_cksum(buf + 3, payload_len);
 	buf[3 + payload_len] = cks;
 
+#if TEST_MODE
+	// 在测试模式下，打印即将发送的帧内容，不真正发送
+	ESP_LOGI(TAG, "TEST_MODE: Frame to send: ");
+	for (size_t i = 0; i < payload_len + 4; ++i) {
+		printf("%02X ", buf[i]);
+	}
+	printf("\n");
+	free(buf);
+	return 0;
+#else
 	int w = uart_write_bytes(SERIAL_PORT_NUM, (const char *)buf, (int)(payload_len + 4));
 	free(buf);
 	if (w <= 0) return -1;
 	return 0;
+#endif
+}
+
+// 发送单个电机命令的便捷函数
+int send_motor_command(uint8_t id, int16_t speed, int16_t pos, uint8_t mode)
+{
+	motor_command_t cmd = {
+		.target_speed = speed,
+		.target_position = pos,
+		.control_mode = mode,
+		.motor_id = id
+	};
+	return serial_cboard_send(&cmd, 1);
 }
 
 // UART 接收并解析任务
@@ -141,12 +164,7 @@ static void serial_task(void *arg)
 	if (!data) vTaskDelete(NULL);
 
 	while (1) {
-		if (TEST_MODE) {
-			// 在测试模式下，不从物理 UART 读取，而由 simulator 注入 raw
-			vTaskDelay(pdMS_TO_TICKS(1000));
-			continue;
-		}
-
+#if !TEST_MODE
 		int len = uart_read_bytes(SERIAL_PORT_NUM, data, SERIAL_RX_BUF_SIZE, pdMS_TO_TICKS(200));
 		if (len <= 0) continue;
 
@@ -168,6 +186,10 @@ static void serial_task(void *arg)
 			}
 			idx++;
 		}
+#else
+		// 在测试模式下，不从物理 UART 读取，而由 simulator 注入 raw
+		vTaskDelay(pdMS_TO_TICKS(1000));
+#endif
 	}
 
 	free(data);

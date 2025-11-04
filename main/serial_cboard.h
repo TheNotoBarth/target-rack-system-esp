@@ -31,6 +31,9 @@ void serial_cboard_process_raw(const uint8_t *data, size_t len);
 // 获取指定 id 的电机状态（返回内部静态副本，调用者不可修改）
 const motor_status_t* get_motor_status(uint8_t id);
 
+// 发送单个电机命令的便捷函数
+int send_motor_command(uint8_t id, int16_t speed, int16_t pos, uint8_t mode);
+
 // 可选：从外部获取最近解析到的电机状态（线程安全性：目前仅供调试）
 // 这里我们只提供打印回调，具体状态可在后续扩展
 
