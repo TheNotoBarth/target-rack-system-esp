@@ -5,65 +5,180 @@
 #include "esp_log.h"
 #include "config.h"
 #include "serial_cboard.h"
+#include "simulator.h"
+#include <math.h>
 
 static const char *TAG = "simulator";
 
-// 生成一个模拟的 C 板数据帧并交由 serial_cboard 解析
-static void generate_and_feed_frame(void)
+// 模拟器实现：维护两个电机的当前状态与目标值，并以 SIM_UPDATE_HZ 的频率
+// 逐步逼近目标值，然后打包帧注入到 serial_cboard_process_raw
+
+typedef struct {
+	uint16_t angle; // 0-8191
+	int16_t speed;  // RPM
+	int16_t current; // raw
+	uint8_t temp;
+	uint8_t id;
+} sim_state_t;
+
+static sim_state_t cur_state[2];
+
+// 目标由 simulator_on_command 更新（接收来自 serial_cboard_send 的命令）
+typedef struct {
+	int16_t target_speed;
+	int16_t target_position;
+	uint8_t control_mode; // 0 speed, 1 position
+	uint8_t motor_id;
+} sim_target_t;
+
+static sim_target_t targets[2];
+
+// helper: 找到 motor index (0/1) 对应 id
+static int find_index_by_id(uint8_t id)
 {
-	// payload: 两电机，每个 8 字节 -> 16 字节
-	uint8_t payload[16];
-
-	// 模拟电机1
-	uint16_t angle1 = 1000; // 示例
-	int16_t speed1 = 150;   // RPM
-	int16_t cur1 = 200;     // raw
-	uint8_t temp1 = 35;
-	uint8_t id1 = 1;
-
-	payload[0] = (angle1 >> 8) & 0xFF;
-	payload[1] = angle1 & 0xFF;
-	payload[2] = (uint16_t)(speed1) >> 8;
-	payload[3] = (uint16_t)(speed1) & 0xFF;
-	payload[4] = (uint16_t)(cur1) >> 8;
-	payload[5] = (uint16_t)(cur1) & 0xFF;
-	payload[6] = temp1;
-	payload[7] = id1;
-
-	// 模拟电机2
-	uint16_t angle2 = 4000;
-	int16_t speed2 = -50;
-	int16_t cur2 = -120;
-	uint8_t temp2 = 34;
-	uint8_t id2 = 2;
-
-	payload[8] = (angle2 >> 8) & 0xFF;
-	payload[9] = angle2 & 0xFF;
-	payload[10] = (uint16_t)(speed2) >> 8;
-	payload[11] = (uint16_t)(speed2) & 0xFF;
-	payload[12] = (uint16_t)(cur2) >> 8;
-	payload[13] = (uint16_t)(cur2) & 0xFF;
-	payload[14] = temp2;
-	payload[15] = id2;
-
-	// 构建完整帧: hdr(2) len(1) payload(16) cksum(1)
-	uint8_t frame[2 + 1 + 16 + 1];
-	frame[0] = 0xAA; frame[1] = 0x55; frame[2] = 16;
-	memcpy(frame + 3, payload, 16);
-	uint8_t s = 0;
-	for (int i = 0; i < 16; ++i) s += payload[i];
-	frame[3 + 16] = (uint8_t)(s & 0xFF);
-
-	// 直接把 raw 帧交给解析器（不依赖实际 UART）
-	serial_cboard_process_raw(frame, sizeof(frame));
+	for (int i = 0; i < 2; ++i) if (cur_state[i].id == id) return i;
+	return -1;
 }
 
+// 外部回调：当 ESP 在 TEST_MODE 下发送命令时 serial_cboard 会调用此函数
+void simulator_on_command(const void *cmds_void, size_t cmd_count)
+{
+	if (!cmds_void || cmd_count == 0) return;
+	const motor_command_t *cmds = (const motor_command_t *)cmds_void;
+	for (size_t i = 0; i < cmd_count; ++i) {
+		const motor_command_t *c = &cmds[i];
+		int idx = find_index_by_id(c->motor_id);
+		if (idx < 0) {
+			// 如果未初始化过该 id，则使用第一个空位
+			for (int j = 0; j < 2; ++j) {
+				if (cur_state[j].id == 0) { idx = j; break; }
+			}
+			if (idx < 0) idx = 0; // 强制使用 0
+			cur_state[idx].id = c->motor_id;
+		}
+		targets[idx].target_speed = c->target_speed;
+		targets[idx].target_position = c->target_position;
+		targets[idx].control_mode = c->control_mode;
+		targets[idx].motor_id = c->motor_id;
+		ESP_LOGI(TAG, "simulator: received cmd for id=%u mode=%u tgt_speed=%d tgt_pos=%d (idx=%d)",
+				 c->motor_id, c->control_mode, c->target_speed, c->target_position, idx);
+	}
+}
+
+// 初始化默认值（第一次运行时）
+static void sim_init_once(void)
+{
+	static bool inited = false;
+	if (inited) return;
+	inited = true;
+	// 默认 id 1/2
+	cur_state[0].id = 1; cur_state[0].angle = 0; cur_state[0].speed = 0; cur_state[0].current = 0; cur_state[0].temp = 30;
+	cur_state[1].id = 2; cur_state[1].angle = 4096; cur_state[1].speed = 0; cur_state[1].current = 0; cur_state[1].temp = 30;
+	// 默认目标为当前值
+	for (int i = 0; i < 2; ++i) {
+		targets[i].motor_id = cur_state[i].id;
+		targets[i].target_speed = cur_state[i].speed;
+		targets[i].target_position = cur_state[i].angle;
+		targets[i].control_mode = 0;
+	}
+}
+
+// 将 int 值按 big-endian 放入 buf
+static inline void put_be16(uint8_t *buf, uint16_t v)
+{
+	buf[0] = (v >> 8) & 0xFF;
+	buf[1] = v & 0xFF;
+}
+
+// 每个周期更新状态并注入帧
 static void sim_task(void *arg)
 {
-	ESP_LOGI(TAG, "simulator started (TEST_MODE=%d)", TEST_MODE);
+	sim_init_once();
+	ESP_LOGI(TAG, "simulator started (TEST_MODE=%d) update_hz=%d", TEST_MODE, SIM_UPDATE_HZ);
+	const float hz = (float)SIM_UPDATE_HZ;
+	const float dt = 1.0f / hz;
+
+	// 动力学参数（可调）
+	const float max_accel_rpm_per_sec = 2000.0f; // 最大加速度
+	const float pos_k = 0.5f; // 位置误差到速度的比例 (RPM per encoder unit)
+	const int16_t max_rpm = 4000; // 限幅
+
 	while (1) {
-		generate_and_feed_frame();
-		vTaskDelay(pdMS_TO_TICKS(1000));
+		// 更新每个电机
+		for (int i = 0; i < 2; ++i) {
+			sim_state_t *s = &cur_state[i];
+			sim_target_t *t = &targets[i];
+
+			// 根据 control_mode 决定期望速度
+			int16_t desired_speed = t->target_speed;
+			if (t->control_mode == 1) {
+				// 位置控制：计算最短角度差（编码器单位 0..8191）
+				int32_t diff = (int32_t)t->target_position - (int32_t)s->angle;
+				// wrap to [-4096,4095]
+				while (diff > 4096) diff -= 8192;
+				while (diff < -4096) diff += 8192;
+				// 把位置误差映射为速度
+				float v = diff * pos_k;
+				if (v > max_rpm) v = max_rpm;
+				if (v < -max_rpm) v = -max_rpm;
+				desired_speed = (int16_t)v;
+			}
+
+			// 限制加速度：每秒 max_accel_rpm_per_sec
+			float max_delta_per_tick = max_accel_rpm_per_sec * dt;
+			float delta = (float)desired_speed - (float)s->speed;
+			if (delta > max_delta_per_tick) delta = max_delta_per_tick;
+			if (delta < -max_delta_per_tick) delta = -max_delta_per_tick;
+			s->speed = (int16_t)roundf((float)s->speed + delta);
+
+			// 更新角度： RPM -> 编码器单位增量
+			// RPM -> rev/s = RPM/60, rev/s * 8192 = units/s
+			float units_per_sec = ((float)s->speed) / 60.0f * 8192.0f;
+			float units_step = units_per_sec * dt;
+			int32_t new_angle = (int32_t)s->angle + (int32_t)roundf(units_step);
+			// wrap 0..8191
+			new_angle %= 8192;
+			if (new_angle < 0) new_angle += 8192;
+			s->angle = (uint16_t)new_angle;
+
+			// 模拟电流：与速度变化相关（简单模型）
+			int16_t simulated_current = (int16_t)roundf(delta * 0.5f); // scale
+			// clamp 到 -2000..2000（代表 -20A..20A, 需与上位解析对应）
+			if (simulated_current > 2000) simulated_current = 2000;
+			if (simulated_current < -2000) simulated_current = -2000;
+			s->current = simulated_current;
+
+			// 温度慢慢随电流升高
+			int tmp = s->temp + (abs(s->current) / 500); // small change per tick
+			if (tmp > 100) tmp = 100;
+			if (tmp < 20) tmp = 20;
+			s->temp = (uint8_t)tmp;
+		}
+
+		// 构建 payload（两个电机，每个 8 字节）
+		uint8_t payload[16];
+		for (int i = 0; i < 2; ++i) {
+			sim_state_t *s = &cur_state[i];
+			int base = i * 8;
+			put_be16(payload + base + 0, s->angle);
+			put_be16(payload + base + 2, (uint16_t)s->speed);
+			put_be16(payload + base + 4, (uint16_t)s->current);
+			payload[base + 6] = s->temp;
+			payload[base + 7] = s->id;
+		}
+
+		uint8_t frame[2 + 1 + 16 + 1];
+		frame[0] = 0xAA; frame[1] = 0x55; frame[2] = 16;
+		memcpy(frame + 3, payload, 16);
+		uint8_t ssum = 0;
+		for (int i = 0; i < 16; ++i) ssum += payload[i];
+		frame[3 + 16] = ssum;
+
+		// 注入解析器
+		serial_cboard_process_raw(frame, sizeof(frame));
+
+		// 等待下一周期
+		vTaskDelay(pdMS_TO_TICKS((uint32_t)(1000.0f / hz)));
 	}
 }
 

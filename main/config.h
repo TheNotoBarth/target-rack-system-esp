@@ -23,3 +23,8 @@
 #define BUTTON_POLL_INTERVAL_MS 50
 
 #endif // CONFIG_H
+
+// Simulator 配置（用于 TEST_MODE）
+#ifndef SIM_UPDATE_HZ
+#define SIM_UPDATE_HZ 50 // 模拟器更新频率，单位 Hz。可以在需要时修改。
+#endif

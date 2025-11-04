@@ -7,6 +7,9 @@
 #include "driver/uart.h"
 #include "esp_log.h"
 #include "config.h"
+#if TEST_MODE
+#include "simulator.h"
+#endif
 
 static const char *TAG = "serial_cboard";
 
@@ -135,6 +138,11 @@ int serial_cboard_send(const motor_command_t *cmds, size_t cmd_count)
 		printf("%02X ", buf[i]);
 	}
 	printf("\n");
+    // 在测试模式下，通知模拟器更新目标（若模拟器存在）
+    if (cmds && cmd_count > 0) {
+        // 回调模拟器，将命令数组传过去（注意类型不严格依赖，以避免循环包含复杂性）
+        simulator_on_command((const void *)cmds, cmd_count);
+    }
 	free(buf);
 	return 0;
 #else
