@@ -10,6 +10,32 @@
 
 static const char *TAG = "serial_cboard";
 
+// 双电机状态维护
+static motor_status_t motor1;
+static motor_status_t motor2;
+
+// 用于保护对 motor1/motor2 的并发访问
+#include "freertos/semphr.h"
+static SemaphoreHandle_t motor_lock = NULL;
+
+// 返回指定 id 的电机状态（线程安全：复制到静态缓冲区并返回指针）
+const motor_status_t* get_motor_status(uint8_t id)
+{
+	static motor_status_t buf;
+	if (motor_lock) xSemaphoreTake(motor_lock, portMAX_DELAY);
+	if (id == motor1.motor_id) {
+		buf = motor1;
+	} else if (id == motor2.motor_id) {
+		buf = motor2;
+	} else {
+		// 若 id 不匹配，返回 NULL (保持 buf 不变)
+		if (motor_lock) xSemaphoreGive(motor_lock);
+		return NULL;
+	}
+	if (motor_lock) xSemaphoreGive(motor_lock);
+	return &buf;
+}
+
 // UART 配置
 #define SERIAL_PORT_NUM      UART_NUM_1
 #define SERIAL_TX_GPIO       17
@@ -44,6 +70,15 @@ static void parse_and_print_status(const uint8_t *payload, size_t payload_len)
 		st.current = (int16_t)((uint16_t)p[4] << 8 | p[5]);
 		st.temperature = p[6];
 		st.motor_id = p[7];
+
+		// 更新到对应的全局状态（加锁保护）
+		if (motor_lock) xSemaphoreTake(motor_lock, portMAX_DELAY);
+		if (st.motor_id == 1) {
+			motor1 = st;
+		} else if (st.motor_id == 2) {
+			motor2 = st;
+		}
+		if (motor_lock) xSemaphoreGive(motor_lock);
 
 		// 打印 -> 在串口监视器中可见
 		ESP_LOGI(TAG, "Motor %u: angle=%u (0-8191), speed=%d RPM, current=%d (raw), temp=%uC",
@@ -156,6 +191,9 @@ void serial_cboard_init(void)
 
 	// 启动解析任务
 	xTaskCreate(serial_task, "serial_task", 4096, NULL, 10, NULL);
+
+	// 初始化状态锁
+	if (!motor_lock) motor_lock = xSemaphoreCreateMutex();
 
 	ESP_LOGI(TAG, "serial_cboard initialized (UART%d TX=%d RX=%d)", SERIAL_PORT_NUM, SERIAL_TX_GPIO, SERIAL_RX_GPIO);
 }

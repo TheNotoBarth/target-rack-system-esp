@@ -28,6 +28,9 @@ int serial_cboard_send(const motor_command_t *cmds, size_t cmd_count);
 // 在非硬件环境（TEST_MODE）下，将原始帧数据直接交由解析器处理（用于模拟）
 void serial_cboard_process_raw(const uint8_t *data, size_t len);
 
+// 获取指定 id 的电机状态（返回内部静态副本，调用者不可修改）
+const motor_status_t* get_motor_status(uint8_t id);
+
 // 可选：从外部获取最近解析到的电机状态（线程安全性：目前仅供调试）
 // 这里我们只提供打印回调，具体状态可在后续扩展
 
