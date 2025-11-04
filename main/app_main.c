@@ -92,6 +92,18 @@ void app_main(void)
     esp_log_level_set("serial_cboard", ESP_LOG_INFO);
     esp_log_level_set("simulator", ESP_LOG_INFO);
 
+    // 初始化 UART0 用于 CLI
+    const uart_config_t uart0_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_APB,
+    };
+    uart_driver_install(UART_NUM_0, 1024, 0, 0, NULL, 0);
+    uart_param_config(UART_NUM_0, &uart0_config);
+
     // 初始化串口通信模块
     serial_cboard_init();
 
