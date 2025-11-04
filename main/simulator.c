@@ -7,6 +7,7 @@
 #include "serial_cboard.h"
 #include "simulator.h"
 #include <math.h>
+#include <stdbool.h>
 
 static const char *TAG = "simulator";
 
@@ -22,6 +23,9 @@ typedef struct {
 } sim_state_t;
 
 static sim_state_t cur_state[2];
+
+// 模拟器内部的 homing 标志（仅在模拟器层面用于产生电流突变）
+static bool sim_homed[2] = { false, false };
 
 // 目标由 simulator_on_command 更新（接收来自 serial_cboard_send 的命令）
 typedef struct {
@@ -81,6 +85,19 @@ static void sim_init_once(void)
 		targets[i].target_position = cur_state[i].angle;
 		targets[i].control_mode = 0;
 	}
+
+	// 在测试模式下，如果启用了电流复位，则对指定的复位电机施加一个缓慢的反向速度，
+	// 以便在到达编码 0 时触发电流突变（仅模拟）。
+#if RESET_BY_CURRENT_ENABLED
+	for (int i = 0; i < 2; ++i) {
+		if (cur_state[i].id == RESET_MOTOR_ID) {
+			// 小反向速度（RPM），使编码逐渐减小到 0
+			targets[i].target_speed = -30; // 可根据需要调整
+			sim_homed[i] = false;
+			ESP_LOGI(TAG, "simulator: motor id %u will perform startup homing (sim)", cur_state[i].id);
+		}
+	}
+#endif
 }
 
 // 将 int 值按 big-endian 放入 buf
@@ -139,10 +156,29 @@ static void sim_task(void *arg)
 			// wrap 0..8191
 			new_angle %= 8192;
 			if (new_angle < 0) new_angle += 8192;
+			uint16_t prev_angle = s->angle;
 			s->angle = (uint16_t)new_angle;
 
 			// 模拟电流：与速度变化相关（简单模型）
 			int16_t simulated_current = (int16_t)roundf(delta * 0.5f); // scale
+
+			// 如果这是模拟的需要通过电流复位的电机，并且尚未在模拟器层面标记为 homed，
+			// 当角度接近 0（或变为 0）时产生一次电流突变以触发上层复位检测。
+			// 这样可以模拟上电时向右（反向）运动并在碰到限位/堵转时电流突增的场景。
+#if RESET_BY_CURRENT_ENABLED
+			if (s->id == RESET_MOTOR_ID) {
+				// 当从非0 移动到接近 0 时触发
+				if (!sim_homed[i] && (s->angle == 0 || s->angle <= 2)) {
+					// 强制短时电流突变（最大值）
+					simulated_current = 2000;
+					sim_homed[i] = true;
+					// 停止移动
+					s->speed = 0;
+					targets[i].target_speed = 0;
+					ESP_LOGI(TAG, "simulator: motor id %u simulated homing reached -> current spike", s->id);
+				}
+			}
+#endif
 			// clamp 到 -2000..2000（代表 -20A..20A, 需与上位解析对应）
 			if (simulated_current > 2000) simulated_current = 2000;
 			if (simulated_current < -2000) simulated_current = -2000;

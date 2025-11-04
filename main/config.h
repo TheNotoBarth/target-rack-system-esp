@@ -28,3 +28,19 @@
 #ifndef SIM_UPDATE_HZ
 #define SIM_UPDATE_HZ 50 // 模拟器更新频率，单位 Hz。可以在需要时修改。
 #endif
+
+// 复位相关配置
+// 若启用通过电流复位，则当指定电机的 raw current 超过阈值时视为复位触发
+#ifndef RESET_BY_CURRENT_ENABLED
+#define RESET_BY_CURRENT_ENABLED 1
+#endif
+
+#ifndef RESET_MOTOR_ID
+// 默认将 ID=2 的电机视为需复位的 M3508（可按需修改）
+#define RESET_MOTOR_ID 2
+#endif
+
+#ifndef RESET_CURRENT_RAW_THRESHOLD
+// raw 值范围与 simulator 保持一致：-2000..2000 对应 -20A..20A
+#define RESET_CURRENT_RAW_THRESHOLD 1500
+#endif

@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
@@ -10,6 +11,7 @@
 #if TEST_MODE
 #include "simulator.h"
 #endif
+#include "ui_state.h"
 
 static const char *TAG = "serial_cboard";
 
@@ -60,6 +62,9 @@ static uint8_t calc_cksum(const uint8_t *payload, size_t len)
 }
 
 // 解析 payload 为 motor_status（每组 8 字节）
+// 用于记录哪些电机已完成复位（防止重复触发）
+static bool motor_homed_map[256] = { false };
+
 static void parse_and_print_status(const uint8_t *payload, size_t payload_len)
 {
 	// 每个电机8字节：angle(2), speed(2), current(2), temp(1), id(1)
@@ -74,6 +79,20 @@ static void parse_and_print_status(const uint8_t *payload, size_t payload_len)
 		st.temperature = p[6];
 		st.motor_id = p[7];
 
+		// 检测是否需要触发电流复位（仅在配置启用时）
+#if RESET_BY_CURRENT_ENABLED
+		if (st.motor_id == RESET_MOTOR_ID) {
+			int16_t abs_curr = (st.current < 0) ? -st.current : st.current;
+			if (!motor_homed_map[st.motor_id] && abs_curr >= RESET_CURRENT_RAW_THRESHOLD) {
+				// 标记已复位
+				motor_homed_map[st.motor_id] = true;
+				ESP_LOGI(TAG, "Motor %u reset by overcurrent (raw=%d)", st.motor_id, st.current);
+				// 进入手动模式作为正常控制阶段入口
+				ui_state_set_mode(MODE_MANUAL);
+			}
+		}
+#endif
+
 		// 更新到对应的全局状态（加锁保护）
 		if (motor_lock) xSemaphoreTake(motor_lock, portMAX_DELAY);
 		if (st.motor_id == 1) {
@@ -84,8 +103,8 @@ static void parse_and_print_status(const uint8_t *payload, size_t payload_len)
 		if (motor_lock) xSemaphoreGive(motor_lock);
 
 		// 打印 -> 在串口监视器中可见
-		ESP_LOGI(TAG, "Motor %u: angle=%u (0-8191), speed=%d RPM, current=%d (raw), temp=%uC",
-				 st.motor_id, st.angle, st.speed, st.current, st.temperature);
+		// ESP_LOGI(TAG, "Motor %u: angle=%u (0-8191), speed=%d RPM, current=%d (raw), temp=%uC",
+		// 		 st.motor_id, st.angle, st.speed, st.current, st.temperature);
 	}
 }
 
