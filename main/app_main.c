@@ -2,6 +2,7 @@
 #include "config.h"
 #include "serial_cboard.h"
 #include "simulator.h"
+#include "ui_state.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -9,6 +10,12 @@
 #include "string.h"
 
 static const char *TAG = "app_main";
+
+static void mode_change_cb(control_mode_t new_mode)
+{
+	const char *names[] = {"MANUAL", "PRESET1", "PRESET2"};
+	printf("[MODE_CB] new mode = %s\n", names[new_mode]);
+}
 
 // CLI 任务：读取 UART0 输入并解析命令
 static void cli_task(void *arg)
@@ -46,7 +53,28 @@ static void cli_task(void *arg)
 							printf("Invalid command format\n");
 						}
 					} else {
-						printf("Unknown command: %s\n", buf);
+						// 支持测试模式下的按键模拟："press up" / "press down" / "press ok"
+						if (strncmp(buf, "press ", 6) == 0) {
+							char which[16];
+							if (sscanf(buf, "press %15s", which) == 1) {
+								if (strcmp(which, "up") == 0) {
+									ui_state_button_event_up();
+									printf("Simulated button: UP\n");
+								} else if (strcmp(which, "down") == 0) {
+									ui_state_button_event_down();
+									printf("Simulated button: DOWN\n");
+								} else if (strcmp(which, "ok") == 0) {
+									ui_state_button_event_ok();
+									printf("Simulated button: OK\n");
+								} else {
+									printf("Unknown press target: %s\n", which);
+								}
+							} else {
+								printf("Invalid press command\n");
+							}
+						} else {
+							printf("Unknown command: %s\n", buf);
+						}
 					}
 				}
 				idx = 0;
@@ -71,6 +99,10 @@ void app_main(void)
     #if TEST_MODE
     simulator_start();
     #endif
+
+	// 初始化 UI 状态机（按键逻辑）
+	ui_state_init();
+	ui_state_register_mode_change_cb(mode_change_cb);
 
     // 启动 CLI 任务
     xTaskCreate(cli_task, "cli_task", 4096, NULL, 5, NULL);
