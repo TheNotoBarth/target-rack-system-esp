@@ -3,6 +3,7 @@
 #include "serial_cboard.h"
 #include "simulator.h"
 #include "ui_state.h"
+#include "display_uart.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -86,6 +87,20 @@ static void cli_task(void *arg)
 	vTaskDelete(NULL);
 }
 
+	// 周期性刷新显示任务（移至文件作用域，避免在函数内定义）
+	static void display_task(void *arg)
+	{
+		(void)arg;
+		while (1) {
+			const motor_status_t *m1 = get_motor_status(1);
+			const motor_status_t *m2 = get_motor_status(2);
+			control_mode_t cm = ui_state_get_mode();
+			display_update(m1, m2, cm);
+			vTaskDelay(pdMS_TO_TICKS(1000));
+		}
+		vTaskDelete(NULL);
+	}
+
 void app_main(void)
 {
     printf("System Booting... [TEST_MODE=%d]\n", TEST_MODE);
@@ -118,6 +133,12 @@ void app_main(void)
 
     // 启动 CLI 任务
     xTaskCreate(cli_task, "cli_task", 4096, NULL, 5, NULL);
+
+	// 初始化并启动显示模块（会在 TEST_MODE 下仅打印显示命令）
+	display_init();
+
+	// 周期性刷新显示（1Hz）
+	xTaskCreate(display_task, "display_task", 4096, NULL, 5, NULL);
 
     ESP_LOGI(TAG, "app_main finished init");
     // 主任务不退出
