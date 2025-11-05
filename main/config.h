@@ -44,3 +44,13 @@
 // raw 值范围与 simulator 保持一致：-2000..2000 对应 -20A..20A
 #define RESET_CURRENT_RAW_THRESHOLD 1500
 #endif
+
+// 是否启用微动开关复位的模拟（当编码到达指定角度时视为触发）
+#ifndef RESET_BY_SWITCH_ENABLED
+#define RESET_BY_SWITCH_ENABLED 1
+#endif
+
+// 用于模拟微动开关触发的编码器阈值（当角度 <= 此值时认为触发）
+#ifndef RESET_SWITCH_ANGLE_THRESHOLD
+#define RESET_SWITCH_ANGLE_THRESHOLD 2
+#endif

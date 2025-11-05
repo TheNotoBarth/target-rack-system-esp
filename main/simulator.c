@@ -92,7 +92,7 @@ static void sim_init_once(void)
 	for (int i = 0; i < 2; ++i) {
 		if (cur_state[i].id == RESET_MOTOR_ID) {
 			// 小反向速度（RPM），使编码逐渐减小到 0
-			targets[i].target_speed = -30; // 可根据需要调整
+			targets[i].target_speed = -5; // 可根据需要调整
 			sim_homed[i] = false;
 			ESP_LOGI(TAG, "simulator: motor id %u will perform startup homing (sim)", cur_state[i].id);
 		}
@@ -152,30 +152,69 @@ static void sim_task(void *arg)
 			// RPM -> rev/s = RPM/60, rev/s * 8192 = units/s
 			float units_per_sec = ((float)s->speed) / 60.0f * 8192.0f;
 			float units_step = units_per_sec * dt;
-			int32_t new_angle = (int32_t)s->angle + (int32_t)roundf(units_step);
-			// wrap 0..8191
-			new_angle %= 8192;
-			if (new_angle < 0) new_angle += 8192;
-			uint16_t prev_angle = s->angle;
-			s->angle = (uint16_t)new_angle;
+			int32_t prev_angle = s->angle;
+			int32_t candidate_angle = prev_angle + (int32_t)roundf(units_step);
 
-			// 模拟电流：与速度变化相关（简单模型）
+
+			// 先计算基础模拟电流：与速度变化相关（简单模型）
 			int16_t simulated_current = (int16_t)roundf(delta * 0.5f); // scale
 
-			// 如果这是模拟的需要通过电流复位的电机，并且尚未在模拟器层面标记为 homed，
-			// 当角度接近 0（或变为 0）时产生一次电流突变以触发上层复位检测。
-			// 这样可以模拟上电时向右（反向）运动并在碰到限位/堵转时电流突增的场景。
+			// 对于相对编码（如 M3508，配置为 RESET_MOTOR_ID），不允许环绕，严格 clamp 到 [0,8191]
+			if (s->id == RESET_MOTOR_ID) {
+				if (candidate_angle < 0) {
+					// 到达下限，保持为 0（不环绕）
+					s->angle = 0;
+					// 如果仍在向负方向移动，模拟堵转/碰撞导致电流显著增大（恒定 bump，而非累加）
+					if (s->speed < 0) {
+						int bump = 1000 + (int)(abs(s->speed) / 2);
+						if (bump > 2000) bump = 2000;
+						// 直接设置为 bump（保留方向由速度决定）
+						simulated_current = (s->speed < 0) ? -bump : bump;
+					}
+				} else if (candidate_angle > 8191) {
+					// 到达上限，保持为 8191（不环绕）
+					s->angle = 8191;
+					if (s->speed > 0) {
+						int bump = 1000 + (int)(abs(s->speed) / 2);
+						if (bump > 2000) bump = 2000;
+						simulated_current = (s->speed < 0) ? -bump : bump;
+					}
+				} else {
+					s->angle = (uint16_t)candidate_angle;
+				}
+			} else {
+				// 绝对编码或其他电机，保持原来的环绕行为
+				int32_t new_angle = candidate_angle % 8192;
+				if (new_angle < 0) new_angle += 8192;
+				s->angle = (uint16_t)new_angle;
+			}
+
+			// 支持两种复位模拟方式：电流突增（RESET_BY_CURRENT_ENABLED）或微动开关触发（RESET_BY_SWITCH_ENABLED）
 #if RESET_BY_CURRENT_ENABLED
 			if (s->id == RESET_MOTOR_ID) {
-				// 当从非0 移动到接近 0 时触发
-				if (!sim_homed[i] && (s->angle == 0 || s->angle <= 2)) {
-					// 强制短时电流突变（最大值）
-					simulated_current = 2000;
+				// 当未标记为 homed 且到达接近开关位置/处于边界并产生较高电流时触发
+				if (!sim_homed[i]) {
+					// 如果电流已经被模拟成很高（例如刚才因为边界导致的 bump），触发 homing
+					if (abs(simulated_current) >= RESET_CURRENT_RAW_THRESHOLD || s->angle == 0 || s->angle <= RESET_SWITCH_ANGLE_THRESHOLD) {
+						simulated_current = 2000;
+						sim_homed[i] = true;
+						// 停止移动
+						s->speed = 0;
+						targets[i].target_speed = 0;
+						ESP_LOGI(TAG, "simulator: motor id %u simulated homing reached -> current spike", s->id);
+					}
+				}
+			}
+#endif
+
+#if RESET_BY_SWITCH_ENABLED
+			if (s->id == RESET_MOTOR_ID) {
+				if (!sim_homed[i] && s->angle <= RESET_SWITCH_ANGLE_THRESHOLD) {
+					// 模拟微动开关触发
 					sim_homed[i] = true;
-					// 停止移动
 					s->speed = 0;
 					targets[i].target_speed = 0;
-					ESP_LOGI(TAG, "simulator: motor id %u simulated homing reached -> current spike", s->id);
+					ESP_LOGI(TAG, "simulator: motor id %u simulated homing reached -> switch triggered", s->id);
 				}
 			}
 #endif
