@@ -26,19 +26,24 @@ static SemaphoreHandle_t motor_lock = NULL;
 // 返回指定 id 的电机状态（线程安全：复制到静态缓冲区并返回指针）
 const motor_status_t* get_motor_status(uint8_t id)
 {
-	static motor_status_t buf;
+	// 注意：之前实现使用了一个单一的静态缓冲区并返回其地址，
+	// 导致连续两次调用 get_motor_status(1) 和 get_motor_status(2)
+	// 返回的指针指向同一缓冲区，被后一次调用覆盖，进而使
+	// 上层代码误以为两台电机状态相同。这里改为直接返回
+	// 指向内部静态对象 motor1/motor2 的只读指针。
+	// 读取时仍短时加锁以保证一致性（但返回后调用者需
+	// 视为只读并接受可能的并发更新）。
+	const motor_status_t *ret = NULL;
 	if (motor_lock) xSemaphoreTake(motor_lock, portMAX_DELAY);
 	if (id == motor1.motor_id) {
-		buf = motor1;
+		ret = &motor1;
 	} else if (id == motor2.motor_id) {
-		buf = motor2;
+		ret = &motor2;
 	} else {
-		// 若 id 不匹配，返回 NULL (保持 buf 不变)
-		if (motor_lock) xSemaphoreGive(motor_lock);
-		return NULL;
+		ret = NULL;
 	}
 	if (motor_lock) xSemaphoreGive(motor_lock);
-	return &buf;
+	return ret;
 }
 
 // UART 配置

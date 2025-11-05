@@ -4,6 +4,7 @@
 #include "simulator.h"
 #include "ui_state.h"
 #include "display_uart.h"
+#include "webserver.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -140,7 +141,10 @@ void app_main(void)
 	// 周期性刷新显示（1Hz）
 	xTaskCreate(display_task, "display_task", 4096, NULL, 5, NULL);
 
-    ESP_LOGI(TAG, "app_main finished init");
+	// 初始化 Web Server（Wi-Fi AP + HTTP Server）
+	webserver_init();
+
+    ESP_LOGI(TAG, "app_main finished init. Access web interface at http://192.168.4.1");
     // 主任务不退出
     while (1) vTaskDelay(pdMS_TO_TICKS(10000));
 }
