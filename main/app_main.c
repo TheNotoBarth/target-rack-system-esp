@@ -6,17 +6,95 @@
 #include "display_uart.h"
 #include "webserver.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
 #include "string.h"
+#include <math.h>
 
 static const char *TAG = "app_main";
+
+// 预设任务句柄（单例）
+static TaskHandle_t s_preset_task = NULL;
+
+static void stop_preset_task(void)
+{
+	if (s_preset_task) {
+		vTaskDelete(s_preset_task);
+		s_preset_task = NULL;
+	}
+}
+
+// PRESET1: GM6020 角度在 0,90,180,270 之间每 2s 跳变一次；
+// M3508 在 0 <-> 8191 循环，尝试设置速度为 5
+static void preset1_task(void *arg)
+{
+	(void)arg;
+	const int degs[4] = {0, 90, 180, 270};
+	int idx = 0;
+	while (ui_state_get_mode() == MODE_PRESET1) {
+		// GM6020 目标角度 -> 转换为 0-8191 范围
+		int deg = degs[idx % 4];
+		int pos1 = (int)roundf((deg / 360.0f) * 8191.0f);
+		send_motor_command(1, 0, (int16_t)pos1, 1); // mode 1 = position
+
+		// M3508: 设定速度为 5（速度模式），并设置交替位置
+		send_motor_command(2, 5, 0, 0); // 尝试设置速度为 5
+		// 交替位置 0 / 8191
+		int pos2 = (idx % 2 == 0) ? 0 : 8191;
+		send_motor_command(2, 0, (int16_t)pos2, 1);
+
+		idx++;
+		vTaskDelay(pdMS_TO_TICKS(2000));
+	}
+	stop_preset_task();
+	vTaskDelete(NULL);
+}
+
+// PRESET2: GM6020 速度设为 10；M3508 做正弦波运动（周期 4s），每 100ms 更新一次
+static void preset2_task(void *arg)
+{
+	(void)arg;
+	const float period_ms = 4000.0f; // 4 秒周期
+	const TickType_t delay_ticks = pdMS_TO_TICKS(100);
+	// 设置 GM6020 速度为 10
+	send_motor_command(1, 10, 0, 0);
+	int64_t start = esp_timer_get_time(); // us
+	while (ui_state_get_mode() == MODE_PRESET2) {
+		int64_t now = esp_timer_get_time();
+		float t = (now - start) / 1000.0f; // ms
+		float phase = fmodf(t, period_ms) / period_ms; // 0..1
+		float s = sinf(2.0f * M_PI * phase);
+		float norm = (s * 0.5f) + 0.5f; // 0..1
+		int pos = (int)roundf(norm * 8191.0f);
+		send_motor_command(2, 0, (int16_t)pos, 1);
+		vTaskDelay(delay_ticks);
+	}
+	stop_preset_task();
+	vTaskDelete(NULL);
+}
 
 static void mode_change_cb(control_mode_t new_mode)
 {
 	const char *names[] = {"MANUAL", "PRESET1", "PRESET2"};
 	printf("[MODE_CB] new mode = %s\n", names[new_mode]);
+
+	// 切换任务
+	if (s_preset_task) {
+		// 先停止已有预设任务
+		stop_preset_task();
+		// 让短暂时间让任务清理
+		vTaskDelay(pdMS_TO_TICKS(10));
+	}
+
+	if (new_mode == MODE_PRESET1) {
+		xTaskCreate(preset1_task, "preset1", 4096, NULL, 5, &s_preset_task);
+	} else if (new_mode == MODE_PRESET2) {
+		xTaskCreate(preset2_task, "preset2", 4096, NULL, 5, &s_preset_task);
+	} else {
+		// 切回手动：不做任何自动命令（用户可通过 UI 控制）
+	}
 }
 
 // CLI 任务：读取 UART0 输入并解析命令
